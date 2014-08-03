@@ -1,0 +1,513 @@
+// -*- c++ -*-
+// $RCSfile:$
+
+#if 0
+This software has been placed into the public domain by Kevin S. Van Horn.
+No restriction of any kind is placed on its use, distribution, or
+modification.  This software is provided without warranty of any kind.
+#endif
+
+
+#ifndef KSVH_SMARTPTR
+#define KSVH_SMARTPTR
+//$Id$
+
+
+#include <new>
+#include <algorithm>
+#include <assert.h>
+
+
+//#include "xassert.hxx"
+namespace ksvh {
+
+// Any use of ctassert<E>, where E is a constant expression,
+// will cause a compile-time error unless E evaulates to a nonzero
+// integral value.
+
+template <bool t>
+struct ctassert {
+  enum { N = 1 - 2 * int(!t) }; // 1 if t is true, -1 if t is false
+  static char A[N];
+};
+
+template <bool t>
+char ctassert<t>::A[N];
+
+// Force compile-time error if A and B are not same type
+
+template <class A, class B>
+struct same_type_aux {
+  enum { same = false };
+};
+
+template <class A>
+struct same_type_aux<A,A> {
+  enum { same = true };
+};
+
+template <class A, class B, int N = 0>
+struct same_type_assert {
+  ctassert< same_type_aux<A,B>::same > dummy;
+};
+
+/****
+
+template <class B, class D>
+struct der_type_assert {
+  der_type_assert()
+    { B * p = (D *)0; }
+};
+
+****/
+
+}
+
+
+//#include "clone.hxx"
+namespace ksvh {
+
+  // This default def. of clone_object will have to be overridden
+  // for classes T which have some derived class D having additional
+  // data members.
+
+  template <class T> inline
+    T * clone_object(T const * p) { return new T(*p); }
+
+}
+
+//#include "assign.hxx"
+#include <algorithm>
+
+namespace ksvh {
+
+template <class T, class U> inline
+T& assign(T& t, U const & u)
+{
+  T tmp(u);
+  t.swap(tmp);
+  return t;
+}
+
+}
+
+
+#if (__GNUG__ >= 3)
+using namespace std;
+using std::swap;
+#endif
+
+namespace ksvh { namespace smart_ptr_aux { } }
+
+namespace ksvh {
+
+namespace smart_ptr_aux {
+
+template <class T>
+class smart_ptr_base {
+public:
+  typedef smart_ptr_base spb;
+  typedef T element_type;
+  bool operator!() const
+    { return ptr == 0; }
+  friend bool operator==(spb const & a, spb const & b)
+    { return a.ptr == b.ptr; }
+  friend bool operator!=(spb const & a, spb const & b)
+    { return a.ptr != b.ptr; }
+
+protected:
+  explicit smart_ptr_base(T * p)
+    : ptr(p) { }
+  ~smart_ptr_base()
+    { }
+  T * ptr;
+
+private:
+  smart_ptr_base & operator=(spb const &) { }
+  smart_ptr_base(spb const &) { }
+};
+
+template <bool b, class T> struct smart_ptr_knobs;
+
+template <class T>
+struct smart_ptr_knobs<false, T> {
+  static T * default_value()
+    { return new T(); }
+  typedef T TC;
+};
+
+template <class T>
+struct smart_ptr_knobs<true, T> {
+  static T * default_value()
+    { return 0; }
+  typedef T const TC;
+};
+
+template <bool cow, class T>
+struct smart_ptr_unique_if_cow;
+
+template <class T>
+struct smart_ptr_unique_if_cow<false, T> {
+  smart_ptr_unique_if_cow(T *) { }
+};
+
+template <class T>
+struct smart_ptr_unique_if_cow<true, T> {
+  smart_ptr_unique_if_cow(T * p)
+    { p->unique(); }
+};
+
+template <bool cow, bool const_prop, bool nullok, class Leaf, class T>
+class smart_ptr_option : public smart_ptr_base<T>
+{
+public:
+  typedef smart_ptr_base<T> spb;
+  typedef typename smart_ptr_knobs<cow || const_prop, T>::TC TC;
+  enum { null_ok = nullok, const_propagates = const_prop, 
+         copy_on_write = cow };
+
+  TC * operator->() const
+    { return this->ptr; }
+  operator TC * () const
+    { return this->ptr; }
+  TC & operator*() const
+    { return *(this->ptr); }
+  TC & operator[](int idx) const
+    { return this->ptr[idx]; }
+  TC * get() const
+    { return this->ptr; }
+  TC * operator~() const
+    { return get(); }
+
+  T * operator->()
+    { return cond_unique(); }
+  operator T * ()
+    { return cond_unique(); }
+  T & operator*()
+    { return *cond_unique(); }
+  T & operator[](int idx)
+    { return cond_unique()[idx]; }
+  T * get()
+    { return cond_unique(); }
+  T * operator~()
+    { return get(); }
+
+protected:
+
+  ctassert<(!cow || const_prop)> dummy_spo;
+
+  smart_ptr_option()
+    : spb(smart_ptr_knobs<nullok, T>::default_value()) { }
+
+  explicit smart_ptr_option(T * p)
+    : spb(p) { assert(nullok || p); }
+
+  T * cond_unique() {
+    smart_ptr_unique_if_cow<cow, Leaf>(static_cast<Leaf *>(this));
+    // the above convolution avoids mentioning unique() unless necessary
+    return this->ptr;
+  }
+
+  template <bool a, bool b, bool c, class A, class B>
+  friend class smart_ptr_option;
+};
+
+
+template <bool const_prop, bool nullok, class T>
+class owned_ptr :
+  public smart_ptr_option<false, const_prop, nullok,
+                          owned_ptr<const_prop, nullok, T>, T>
+{
+  typedef smart_ptr_option<false, const_prop, nullok, owned_ptr, T> spo;
+
+public:
+  typedef typename spo::element_type element_type;
+  template <class U> struct rebind {
+    typedef owned_ptr<const_prop, nullok, U> other;
+  };
+
+  enum { share_pointer = false, invasive = false };
+
+  owned_ptr() { }
+
+  explicit owned_ptr(T* p)
+    : spo(p) { }
+
+  ~owned_ptr()
+    { T * p = this->ptr; this->ptr = 0; delete p; } // p is for exception safety
+
+  owned_ptr(owned_ptr const & x)
+    : spo(!nullok || x.ptr ? clone_object(x.ptr) : 0) { }
+
+  template <class Derived>
+  owned_ptr(owned_ptr<const_prop, nullok, Derived> const & x)
+    : spo(!nullok || x.ptr ? clone_object(x.ptr) : 0) { }
+
+  owned_ptr& operator=(owned_ptr const & x)
+    { return ksvh::assign(*this, x); }
+
+  template <class U>
+  owned_ptr& operator=(U const & x)
+    { return ksvh::assign(*this, x); }
+
+  void swap(owned_ptr & x)
+        { /*std*/::swap(this->ptr, x.ptr); }
+
+  void unique() const { }
+
+  T * swap(T * p)
+    { T * tmp = this->ptr; this->ptr = p; return tmp; }
+
+private:
+  template <bool a, bool b, class U> friend class owned_ptr;
+};
+
+template <bool cow, bool const_prop, bool nullok, class T>
+class inv_rcnt_ptr :
+  public smart_ptr_option<cow, const_prop, nullok,
+                          inv_rcnt_ptr<cow, const_prop, nullok, T>, T>
+{
+  typedef smart_ptr_option<cow, const_prop, nullok, inv_rcnt_ptr, T> spo;
+public:
+  typedef typename spo::element_type element_type;
+  template <class U> struct rebind {
+    typedef inv_rcnt_ptr<cow, const_prop, nullok, U> other;
+  };
+  enum { share_pointer = true, invasive = true };
+
+  inv_rcnt_ptr() { if (!nullok) this->ptr->refcnt = 1; }
+
+  inv_rcnt_ptr(T * p)
+    : spo(p) { inc(); }
+
+  ~inv_rcnt_ptr()
+    { dec(); }
+  
+  inv_rcnt_ptr(inv_rcnt_ptr const & x)
+    : spo(x.ptr) { inc(); }
+
+  template <class Derived>
+  inv_rcnt_ptr(inv_rcnt_ptr<cow, const_prop, nullok, Derived> const & x)
+    : spo(x.ptr) { inc(); }
+
+  inv_rcnt_ptr& operator=(inv_rcnt_ptr const & x)
+    { return ksvh::assign(*this, x); }
+
+  template <class U>
+  inv_rcnt_ptr& operator=(U const & x)
+    { return ksvh::assign(*this, x); }
+
+  void swap(inv_rcnt_ptr& x)
+    { /*std*/::swap(this->ptr, x.ptr); }
+
+  void unique()
+  {
+    if (this->ptr && this->ptr->refcnt > 1) {
+      T * tmp = clone_object(this->ptr); // tmp is for exception safety
+      tmp->refcnt = 1;
+      --this->ptr->refcnt;
+      this->ptr = tmp;
+    }
+  }
+
+private:
+
+  void inc() { if (this->ptr) ++this->ptr->refcnt; }
+
+  void dec() {
+    if (this->ptr && --this->ptr->refcnt == 0) {
+      T * p = this->ptr; this->ptr = 0; delete p; 
+    }
+  }
+
+  template <bool a, bool b, bool c, class U> friend class inv_rcnt_ptr;
+};
+
+template <bool cow, bool const_prop, bool nullok, class T>
+class col_rcnt_ptr :
+  public smart_ptr_option<cow, const_prop, nullok,
+                          col_rcnt_ptr<cow, const_prop, nullok, T>, T>
+{
+  typedef smart_ptr_option<cow, const_prop, nullok, col_rcnt_ptr, T> spo;
+public:
+  typedef typename spo::element_type element_type;
+  template <class U> struct rebind {
+    typedef col_rcnt_ptr<cow, const_prop, nullok, U> other;
+  };
+  enum { share_pointer = true, invasive = false };
+
+  col_rcnt_ptr()
+    : spo(), refcnt(nullok ? 0 : new (/*std*/::nothrow) size_t(1))
+  { 
+    if (!nullok && !refcnt) {
+      delete this->ptr; throw /*std*/::bad_alloc();
+    }
+  }
+
+  col_rcnt_ptr(T * p)
+    : spo(p)
+  {
+    if (!nullok || p) {
+      refcnt = new (/*std*/::nothrow) size_t(1);
+      if (!refcnt) {
+	delete p; throw /*std*/::bad_alloc();
+      }
+    }
+    else refcnt = 0;
+  }
+
+  ~col_rcnt_ptr()
+    { dec(); }
+
+  col_rcnt_ptr(col_rcnt_ptr const & x)
+    : spo(x.ptr), refcnt(x.refcnt)
+    { inc(); }
+
+  template <class Derived>
+  col_rcnt_ptr(col_rcnt_ptr<cow, const_prop, nullok, Derived> const & x)
+    : spo(x.ptr), refcnt(x.refcnt)
+    { inc(); }
+
+  col_rcnt_ptr& operator=(col_rcnt_ptr const & x)
+    { return ksvh::assign(*this, x); }
+
+  template <class U>
+  col_rcnt_ptr& operator=(U const & x)
+    { return ksvh::assign(*this, x); }
+
+  void swap(col_rcnt_ptr & x)
+    #ifdef __alpha
+    { std::swap(this->ptr, x.ptr); std::swap(refcnt, x.refcnt); }
+    #else
+    { /*std*/::swap(this->ptr, x.ptr); /*std*/::swap(refcnt, x.refcnt); }
+    #endif
+
+  void unique()
+  {
+    if (refcnt && *refcnt > 1) {
+      T * p = clone_object(this->ptr);
+      size_t * r = new (/*std*/::nothrow) size_t(1);
+      if (r) {
+	--*refcnt;
+	refcnt = r;
+	this->ptr = p;
+      }
+      else {
+	delete p;
+	throw /*std*/::bad_alloc();
+      }
+    }
+  }
+
+private:
+
+  void inc()
+    { if (refcnt) ++*refcnt; }
+
+  void dec() {
+    if (refcnt && --*refcnt == 0) {
+      T * p = this->ptr;
+      size_t * r = refcnt;
+      this->ptr = 0;
+      refcnt = 0;
+      delete p;
+      delete r;
+    }
+  }
+
+  size_t * refcnt;
+
+  template <bool a, bool b, bool c, class A> friend class col_rcnt_ptr;
+};
+
+} // namespace smart_ptr_aux
+
+template <class T>
+struct smart_ptr {
+
+  // Naming scheme:
+  //        share_pointer, const_prop, nullok, cow, invasive
+  // -------------------------------------------------------
+  // true   s              p           n       c    i
+  // false  o              b           d       w    m
+
+  //                               cp     null
+  typedef smart_ptr_aux::owned_ptr<false, false, T> obd;
+  typedef smart_ptr_aux::owned_ptr<false, true,  T> obn;
+  typedef smart_ptr_aux::owned_ptr<true,  false, T> opd;
+  typedef smart_ptr_aux::owned_ptr<true,  true,  T> opn;
+
+  //                                  cow    cp     null
+  typedef smart_ptr_aux::inv_rcnt_ptr<false, false, false, T> sbdwi;
+  typedef smart_ptr_aux::inv_rcnt_ptr<false, false, true,  T> sbnwi;
+  typedef smart_ptr_aux::inv_rcnt_ptr<false, true,  false, T> spdwi;
+  typedef smart_ptr_aux::inv_rcnt_ptr<false, true,  true,  T> spnwi;
+  typedef smart_ptr_aux::inv_rcnt_ptr<true,  true,  false, T> spdci;
+  typedef smart_ptr_aux::inv_rcnt_ptr<true,  true,  true,  T> spnci;
+
+  //                                  cow    cp     null
+  typedef smart_ptr_aux::col_rcnt_ptr<false, false, false, T> sbdwm;
+  typedef smart_ptr_aux::col_rcnt_ptr<false, false, true,  T> sbnwm;
+  typedef smart_ptr_aux::col_rcnt_ptr<false, true,  false, T> spdwm;
+  typedef smart_ptr_aux::col_rcnt_ptr<false, true,  true,  T> spnwm;
+  typedef smart_ptr_aux::col_rcnt_ptr<true,  true,  false, T> spdcm;
+  typedef smart_ptr_aux::col_rcnt_ptr<true,  true,  true,  T> spncm;
+
+};
+
+class refcnt_base {
+protected:
+  refcnt_base() : refcnt(0) { }
+  refcnt_base(refcnt_base const &) : refcnt(0) { }
+  void operator=(refcnt_base const &) { }
+  ~refcnt_base()
+    { assert(refcnt == 0); }
+
+private:
+  mutable size_t refcnt;
+  template <bool cow, bool const_prop, bool nullok, class T>
+#if defined(__hpux) && !defined(__GNUG__)
+  friend class smart_ptr_aux::inv_rcnt_ptr<cow, const_prop, nullok, T>;
+#else
+  friend class ksvh::smart_ptr_aux::inv_rcnt_ptr;
+#endif
+};
+
+template <class T>
+class refcnt_derived : public T, public refcnt_base {
+public:
+  refcnt_derived() { }
+  refcnt_derived(T const & x)
+    : T(x) { }
+  template <class U> refcnt_derived& operator= (U const & x)
+    { T::operator=(x); return *this; } // SLICE!
+};
+
+}
+
+
+//namespace std {
+
+  template <bool const_prop, bool nullok, class T>
+  /*inline*/ void swap(ksvh::smart_ptr_aux::owned_ptr<const_prop, nullok,T>& x,
+		   ksvh::smart_ptr_aux::owned_ptr<const_prop, nullok,T>& y)
+    { x.swap(y); }
+
+  template <bool cow, bool const_prop, bool nullok, class T>
+  /*inline*/ void 
+  swap(ksvh::smart_ptr_aux::inv_rcnt_ptr<cow, const_prop, nullok, T>& x,
+       ksvh::smart_ptr_aux::inv_rcnt_ptr<cow, const_prop, nullok, T>& y)
+    { x.swap(y); }
+
+  template <bool cow, bool const_prop, bool nullok, class T>
+  /*inline*/ void
+  swap(ksvh::smart_ptr_aux::col_rcnt_ptr<cow, const_prop, nullok, T>& x,
+       ksvh::smart_ptr_aux::col_rcnt_ptr<cow, const_prop, nullok, T>& y)
+    { x.swap(y); }
+
+//}
+
+
+
+#endif // KSVH_SMARTPTR
+

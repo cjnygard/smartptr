@@ -1,0 +1,10 @@
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: smartptr
+Description: Type-safe smart pointer family of classes for C++
+Version: @VERSION@
+Libs: 
+Cflags: -I${includedir}
