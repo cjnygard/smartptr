@@ -1,0 +1,4 @@
+smartptr
+========
+
+SmartPtr template library
